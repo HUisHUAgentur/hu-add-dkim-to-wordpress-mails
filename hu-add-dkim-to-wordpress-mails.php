@@ -1,299 +1,214 @@
 <?php
 /*
  * Plugin Name:       HU Add DKIM-Headers to Wordpress Mails
- * Description:       Add DKIM-Signature to the mails sent by wp_mail and manage DKIM keys.
- * Version:           2.2
+ * Description:       Fügt DKIM-Signaturen zu wp_mail hinzu. Mit Key-Abgleich und flexiblem Testversand.
+ * Version:           3.5
  * Requires at least: 6.0
  * Requires PHP:      7.4
- * Requires Plugins:  cmb2
  * Author:            HUisHU. Digitale Kreativagentur GmbH
- * Author URI:        https://www.huishu-agentur.de
  * License:           GPL v2 or later
- * License URI:       https://www.gnu.org/licenses/gpl-2.0.html
  */
- 
-if (!defined('ABSPATH')) {
-    exit;
-}
+
+if (!defined('ABSPATH')) exit;
 
 /**
- * Holt eine Option und bevorzugt dabei Konstanten aus wp-config.php.
+ * 1. OPTIONS-HANDLING
  */
-function hu_ads_get_option( $key, $default = '' ) {
+function hu_ads_get_opt( $key, $default = '' ) {
     $constant_map = [
-        'dkim_domain'        => 'HU_ADS_DKIM_DOMAIN',
-        'dkim_selector'      => 'HU_ADS_DKIM_SELECTOR',
-        'dkim_passphrase'    => 'HU_ADS_DKIM_PASSPHRASE',
-        'dkim_private_key'   => 'HU_ADS_DKIM_PRIVATE_KEY',
+        'dkim_domain'      => 'HU_ADS_DKIM_DOMAIN',
+        'dkim_selector'    => 'HU_ADS_DKIM_SELECTOR',
+        'dkim_private_key' => 'HU_ADS_DKIM_PRIVATE_KEY',
     ];
 
     if ( isset( $constant_map[$key] ) && defined( $constant_map[$key] ) ) {
         return constant( $constant_map[$key] );
     }
-    
-    if ( function_exists( 'cmb2_get_option' ) ) {
-        return cmb2_get_option( 'hu_ads_options', $key, $default );
-    }
 
-    $opts = get_option( 'hu_ads_options', $default );
-    $val = $default;
-    if ( 'all' == $key ) {
-        $val = $opts;
-    } elseif ( is_array( $opts ) && array_key_exists( $key, $opts ) && false !== $opts[ $key ] ) {
-        $val = $opts[ $key ];
-    }
-    return $val;
+    $opts = get_option( 'hu_ads_settings', [] );
+    return isset( $opts[$key] ) ? $opts[$key] : $default;
 }
 
 /**
- * Fügt die DKIM-Header zu PHPMailer hinzu, WENN die Funktion aktiv ist.
+ * 2. DKIM IN PHPMYMAILER EINSPEISEN
  */
-function hu_ads_add_dkim_header_to_mails( $mail ){
-    // NEU: Prüfen, ob die Signierung überhaupt aktiv ist.
-    $is_active = hu_ads_get_option( 'dkim_active', false );
+add_action( 'phpmailer_init', function( $phpmailer ) {
+    if ( ! hu_ads_get_opt( 'dkim_active' ) ) return;
 
-    $dkim_domain = hu_ads_get_option( 'dkim_domain', '' );
-    $dkim_selector = hu_ads_get_option( 'dkim_selector', '' );
-    $dkim_passphrase = hu_ads_get_option( 'dkim_passphrase', '' );
-    $dkim_key = hu_ads_get_option(  'dkim_private_key', '' );
-    
-    // NEU: Die Bedingung wurde um die $is_active-Prüfung erweitert.
-    if( ! $is_active || ! $dkim_domain || ! $dkim_selector || ! $dkim_key ){
-        return $mail;
+    $domain   = hu_ads_get_opt( 'dkim_domain' );
+    $selector = hu_ads_get_opt( 'dkim_selector' );
+    $key      = hu_ads_get_opt( 'dkim_private_key' );
+
+    if ( $domain && $selector && $key ) {
+        $phpmailer->DKIM_domain         = $domain;
+        $phpmailer->DKIM_selector       = $selector;
+        $phpmailer->DKIM_private_string = $key;
+        $phpmailer->DKIM_passphrase     = hu_ads_get_opt( 'dkim_passphrase', '' );
+        $phpmailer->DKIM_identity       = $phpmailer->From;
     }
-
-    $mail->DKIM_domain = $dkim_domain;
-    $mail->DKIM_private_string = $dkim_key;
-    $mail->DKIM_selector = $dkim_selector;
-    $mail->DKIM_passphrase = $dkim_passphrase;
-    $mail->DKIM_identity = $mail->From;
-    return $mail;
-}
-add_action('phpmailer_init', 'hu_ads_add_dkim_header_to_mails' );
+});
 
 /**
- * Registriert die CMB2-Einstellungsseite.
+ * 3. ADMIN MENÜ & SETTINGS
  */
-function hu_ads_add_dkim_settings(){
-    $cmb = new_cmb2_box(
-        array(
-            'id'           => 'hu_ads_options_page',
-            'title'        => 'DKIM Settings',
-            'object_types' => array( 'options-page' ),
-            'option_key'   => 'hu_ads_options',
-        )
-    );
+add_action( 'admin_menu', function() {
+    add_options_page( 'DKIM Settings', 'DKIM Mailer', 'manage_options', 'hu_ads_dkim', 'hu_ads_render_admin_page' );
+});
 
-    $cmb->add_field(
-        array(
-            'name' => 'DKIM Konfiguration',
-            'desc' => 'Hier kannst du deine E-Mails mit einer DKIM-Signatur versehen.',
-            'type' => 'title',
-            'id'   => 'hu_ads_title'
-        )
-    );
-    
-    // NEU: Checkbox zur Aktivierung der Signierung
-    $cmb->add_field( array(
-        'name' => 'DKIM-Signierung aktiv',
-        'desc' => '<strong>DKIM für ausgehende E-Mails aktivieren.</strong><br>Entferne den Haken, während du die DNS-Einträge einrichtest. Setze ihn erst, wenn du sicher bist, dass der DNS-Eintrag korrekt und weltweit verfügbar ist.',
-        'id'   => 'dkim_active',
-        'type' => 'checkbox'
-    ) );
-
-
-    hu_ads_key_generation_and_dns_display( $cmb );
-
-    $cmb->add_field(
-        array(
-            'name'    => 'Domain',
-            'desc'    => 'Die Domain, von der die E-Mails versendet werden (z.B. "deine-website.de").',
-            'id'      => 'dkim_domain',
-            'type'    => 'text',
-            'attributes' => array(
-                'placeholder' => str_replace( 'www.', '', parse_url( home_url(), PHP_URL_HOST ) )
-            )
-        ) 
-    );
-
-    $cmb->add_field(
-        array(
-            'name'    => 'DKIM Selektor',
-            'desc'    => 'Der Selektor für den DNS-Eintrag (z.B. "default" oder "mail"). Ergibt: <code>[selektor]._domainkey.deine-website.de</code>',
-            'id'      => 'dkim_selector',
-            'type'    => 'text',
-            'default' => 'default',
-        ) 
-    );
-
-    $cmb->add_field(
-        array(
-            'name'    => 'DKIM Passphrase (optional)',
-            'desc'    => 'Falls dein privater Schlüssel mit einer Passphrase geschützt ist.',
-            'id'      => 'dkim_passphrase',
-            'type'    => 'text',
-            'attributes' => array(
-                'type' => 'password'
-            )
-        ) 
-    );
-
-    $cmb->add_field( 
-        array(
-            'name' => 'Privater DKIM Schlüssel',
-            'id' => 'dkim_private_key',
-            'type' => 'textarea',
-            'desc' => 'Füge hier den kompletten privaten Schlüssel ein, inklusive "-----BEGIN PRIVATE KEY-----" und "-----END PRIVATE KEY-----".'
-        )    
-    );
-
-    $cmb->add_field( 
-        array(
-            'id' => 'dkim_public_key',
-            'type' => 'hidden',
-        )    
-    );
-}
-add_action( 'cmb2_admin_init', 'hu_ads_add_dkim_settings' );
+add_action( 'admin_init', function() {
+    register_setting( 'hu_ads_group', 'hu_ads_settings' );
+    hu_ads_handle_admin_actions();
+});
 
 /**
- * Zeigt den Key-Generator und den DNS-Eintrag an.
+ * 4. AKTIONEN (KEY-GEN & TEST-MAIL)
  */
-function hu_ads_key_generation_and_dns_display( $cmb ) {
-    $private_key = hu_ads_get_option( 'dkim_private_key' );
-    $public_key = hu_ads_get_option( 'dkim_public_key' );
-    $options_exist = ! empty( $private_key );
-    
-    if ( defined('HU_ADS_DKIM_PRIVATE_KEY') ) {
-        $cmb->add_field( array(
-            'name' => 'Status',
-            'desc' => 'DKIM wird über Konstanten in deiner `wp-config.php` konfiguriert. Die Einstellungen hier werden ignoriert.',
-            'type' => 'title',
-            'id'   => 'hu_ads_constants_notice'
-        ));
-        return;
-    }
+function hu_ads_handle_admin_actions() {
+    if ( ! isset( $_POST['hu_ads_action'] ) ) return;
+    check_admin_referer( 'hu_ads_action_nonce' );
 
-    if ( ! $options_exist ) {
-        if ( ! function_exists('openssl_pkey_new') ) {
-            $cmb->add_field( array(
-                'name' => 'Warnung!',
-                'desc' => 'Die benötigte OpenSSL-Erweiterung ist auf deinem Server nicht verfügbar. Du kannst keine Schlüssel generieren und musst sie manuell erstellen und hier einfügen.',
-                'type' => 'title',
-                'id'   => 'hu_ads_openssl_warning'
-            ));
-        } else {
-            $cmb->add_field( array(
-                'name' => 'Schlüsselpaar generieren',
-                'desc' => 'Es sind noch keine Schlüssel gespeichert. Du kannst hier ein neues Paar (Privater & Öffentlicher Schlüssel) generieren lassen.',
-                'type' => 'title',
-                'id'   => 'hu_ads_generator_title'
-            ));
-            $cmb->add_field( array(
-                'name' => 'Generator Passphrase (optional)',
-                'id'   => 'generator_passphrase',
-                'type' => 'text',
-                'desc' => 'Du kannst das neue Schlüsselpaar optional mit einer Passphrase schützen.',
-                'attributes' => array('type' => 'password'),
-                'save_field' => false, 
-            ));
-            $cmb->add_field( array(
-                'id'   => 'generator_button',
-                'type' => 'html_button',
-                'desc' => 'Klicke, um die Schlüssel zu erstellen. Die Seite wird neu geladen und die Felder unten werden automatisch befüllt.',
-                'button_text' => 'Schlüsselpaar jetzt generieren',
-                'button_name' => 'hu_ads_generate_keys_submit',
-            ));
+    // Generierung
+    if ( $_POST['hu_ads_action'] === 'generate_keys' ) {
+        $res = openssl_pkey_new([
+            "digest_alg" => "sha256",
+            "private_key_bits" => 2048,
+            "private_key_type" => OPENSSL_KEYTYPE_RSA,
+        ]);
+
+        if ( $res ) {
+            openssl_pkey_export( $res, $privKey );
+            $pubKey = openssl_pkey_get_details($res)['key'];
+
+            $opts = get_option( 'hu_ads_settings', [] );
+            $opts['dkim_private_key'] = $privKey;
+            $opts['dkim_public_key']  = $pubKey;
+            update_option( 'hu_ads_settings', $opts );
+            add_settings_error( 'hu_ads_msg', 'gen', 'Schlüsselpaar generiert! Bitte speichere die Einstellungen, falls du die Domain geändert hast.', 'success' );
         }
     }
 
-    if ( $options_exist && ! empty( $public_key ) ) {
-        $domain = hu_ads_get_option('dkim_domain');
-        $selector = hu_ads_get_option('dkim_selector', 'default');
-        
-        $authoritative_ns_info = '<em>Konnte nicht ermittelt werden. Bitte prüfe die DNS-Einstellungen deiner Domain.</em>';
-        if (function_exists('dns_get_record')) {
-            $ns_records = @dns_get_record($domain, DNS_NS);
-            if (!empty($ns_records)) {
-                $ns_list = wp_list_pluck($ns_records, 'target');
-                $authoritative_ns_info = 'Einer der folgenden Nameserver ist für deine Domain zuständig: <strong>' . implode(', ', $ns_list) . '</strong>';
-            }
-        }
-
-        $public_key_clean = preg_replace( '/\s+/', '', str_replace( array('-----BEGIN PUBLIC KEY-----', '-----END PUBLIC KEY-----'), '', $public_key ) );
-        $dns_record_name = "{$selector}._domainkey.{$domain}";
-        $dns_record_value = "v=DKIM1; k=rsa; p={$public_key_clean}";
-
-        $cmb->add_field( array(
-            'name' => 'Dein DNS-Eintrag',
-            'desc' => 'Kopiere die folgenden Werte in den DNS-Manager deines Hosters, um DKIM zu aktivieren. ' . $authoritative_ns_info,
-            'type' => 'title',
-            'id'   => 'hu_ads_dns_title'
-        ));
-
-        $cmb->add_field( array(
-            'name' => 'Typ',
-            'id'   => 'dns_type',
-            'type' => 'text',
-            'default' => 'TXT',
-            'attributes' => array('readonly' => 'readonly'),
-        ));
-        $cmb->add_field( array(
-            'name' => 'Host / Name',
-            'id'   => 'dns_name',
-            'type' => 'text',
-            'default' => $dns_record_name,
-            'attributes' => array('readonly' => 'readonly'),
-        ));
-        $cmb->add_field( array(
-            'name' => 'Wert / Inhalt',
-            'id'   => 'dns_value',
-            'type' => 'textarea',
-            'default' => $dns_record_value,
-            'attributes' => array('readonly' => 'readonly'),
-        ));
-    }
-}
-
-/**
- * Eigener Feld-Typ für HTML-Buttons in CMB2.
- */
-function hu_ads_render_html_button_field( $field, $escaped_value, $object_id, $object_type, $field_type_object ) {
-    echo $field_type_object->description();
-    echo '<p><button type="submit" class="button button-primary" name="' . esc_attr( $field->args( 'button_name' ) ) . '">' . esc_html( $field->args( 'button_text' ) ) . '</button></p>';
-}
-add_action( 'cmb2_render_html_button', 'hu_ads_render_html_button_field', 10, 5 );
-
-/**
- * Verarbeitet die Aktion zur Key-Generierung auf der Admin-Seite.
- */
-function hu_ads_admin_page_actions() {
-    if ( ! isset( $_POST['object_id'] ) || $_POST['object_id'] !== 'hu_ads_options' ) {
-        return;
-    }
-
-    if ( isset( $_POST['hu_ads_generate_keys_submit'] ) ) {
-        $passphrase = isset( $_POST['generator_passphrase'] ) ? sanitize_text_field( $_POST['generator_passphrase'] ) : '';
-
-        $config = array("digest_alg" => "sha256", "private_key_bits" => 2048, "private_key_type" => OPENSSL_KEYTYPE_RSA);
-        $res = openssl_pkey_new( $config );
-
-        if ( !$res ) {
-            add_settings_error('hu_ads_options', 'keys_generated_error', 'Fehler bei der Schlüsselgenerierung!', 'error');
+    // Test-Mail
+    if ( $_POST['hu_ads_action'] === 'send_test' ) {
+        $to = sanitize_email( $_POST['test_email_recipient'] );
+        if ( ! is_email( $to ) ) {
+            add_settings_error( 'hu_ads_msg', 'test', 'Ungültige Test-E-Mail-Adresse.', 'error' );
             return;
         }
 
-        openssl_pkey_export( $res, $private_key, $passphrase );
-        $public_key_details = openssl_pkey_get_details( $res );
-        $public_key = $public_key_details["key"];
-
-        $options = get_option( 'hu_ads_options', [] );
-        $options['dkim_private_key'] = $private_key;
-        $options['dkim_public_key'] = $public_key;
-        $options['dkim_passphrase'] = $passphrase;
-        update_option( 'hu_ads_options', $options );
+        $subject = 'DKIM Test-Mail von ' . get_bloginfo('name');
+        $message = "Diese Mail testet die DKIM-Einstellungen.\nDomain: " . hu_ads_get_opt('dkim_domain') . "\nSelektor: " . hu_ads_get_opt('dkim_selector');
         
-        add_settings_error('hu_ads_options', 'keys_generated_success', 'Schlüsselpaar erfolgreich generiert und gespeichert!', 'success');
+        if ( wp_mail( $to, $subject, $message ) ) {
+            add_settings_error( 'hu_ads_msg', 'test', 'Test-Mail erfolgreich an ' . $to . ' gesendet.', 'success' );
+        } else {
+            add_settings_error( 'hu_ads_msg', 'test', 'Versand fehlgeschlagen. Prüfe deine Server-Logs.', 'error' );
+        }
     }
 }
-add_action( 'admin_init', 'hu_ads_admin_page_actions', 20 );
+
+/**
+ * 5. ADMIN PAGE RENDERN
+ */
+function hu_ads_render_admin_page() {
+    $pubKeyLocal = hu_ads_get_opt('dkim_public_key');
+    $domain      = hu_ads_get_opt('dkim_domain');
+    $selector    = hu_ads_get_opt('dkim_selector', 'default');
+    
+    // DNS VALIDIERUNG LOGIK
+    $dns_status_msg = "❌ Kein DNS-Eintrag gefunden.";
+    $status_color   = "red";
+    
+    if ( $domain && $pubKeyLocal ) {
+        $host = $selector . '._domainkey.' . $domain;
+        $records = dns_get_record( $host, DNS_TXT );
+        
+        if ( !empty($records) ) {
+            $dns_status_msg = "⚠️ DNS-Eintrag gefunden, aber Schlüssel stimmt nicht überein.";
+            $status_color   = "orange";
+            
+            // Bereinige den lokalen Public Key für den Vergleich
+            $cleanLocal = preg_replace('/\s+/', '', str_replace(["-----BEGIN PUBLIC KEY-----", "-----END PUBLIC KEY-----"], "", $pubKeyLocal));
+            
+            foreach ( $records as $r ) {
+                if ( isset($r['txt']) && strpos($r['txt'], $cleanLocal) !== false ) {
+                    $dns_status_msg = "✅ Korrekter DNS-Eintrag erkannt!";
+                    $status_color   = "green";
+                    break;
+                }
+            }
+        }
+    }
+
+    ?>
+    <div class="wrap">
+        <h1>HU DKIM Mailer</h1>
+        <?php settings_errors('hu_ads_msg'); ?>
+
+        <form method="post" action="options.php">
+            <?php settings_fields( 'hu_ads_group' ); ?>
+            <table class="form-table">
+                <tr>
+                    <th>DKIM Aktivieren</th>
+                    <td>
+                        <input type="checkbox" name="hu_ads_settings[dkim_active]" value="1" <?php checked(1, hu_ads_get_opt('dkim_active')); ?> />
+                        <p class="description">Erst aktivieren, wenn der DNS-Status grün zeigt.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Domain</th>
+                    <td><input type="text" name="hu_ads_settings[dkim_domain]" value="<?php echo esc_attr($domain); ?>" class="regular-text" placeholder="deine-domain.de" /></td>
+                </tr>
+                <tr>
+                    <th>Selektor</th>
+                    <td><input type="text" name="hu_ads_settings[dkim_selector]" value="<?php echo esc_attr($selector); ?>" class="regular-text" /></td>
+                </tr>
+                <tr>
+                    <th>Privater Schlüssel</th>
+                    <td><textarea name="hu_ads_settings[dkim_private_key]" rows="8" class="large-text code" style="font-size:11px;"><?php echo esc_textarea(hu_ads_get_opt('dkim_private_key')); ?></textarea></td>
+                </tr>
+                <tr style="display:none;">
+                    <td><input type="hidden" name="hu_ads_settings[dkim_public_key]" value="<?php echo esc_attr($pubKeyLocal); ?>" /></td>
+                </tr>
+            </table>
+            <?php submit_button('Einstellungen speichern'); ?>
+        </form>
+
+        <hr>
+
+        <h2>Werkzeuge & Live-Check</h2>
+        <form method="post" action="">
+            <?php wp_nonce_field( 'hu_ads_action_nonce' ); ?>
+            <table class="form-table">
+                <?php if ( $pubKeyLocal ): ?>
+                <tr>
+                    <th>DNS Konfiguration</th>
+                    <td>
+                        <p>Lege diesen TXT-Eintrag bei deinem Provider an:</p>
+                        <code><strong>Host:</strong> <?php echo esc_html($selector); ?>._domainkey.<?php echo esc_html($domain); ?></code><br><br>
+                        <code><strong>Wert:</strong> v=DKIM1; k=rsa; p=<?php echo preg_replace('/\s+/', '', str_replace(["-----BEGIN PUBLIC KEY-----", "-----END PUBLIC KEY-----"], "", $pubKeyLocal)); ?></code>
+                        
+                        <div style="margin-top:20px; padding:15px; background:#fff; border-left:4px solid <?php echo $status_color; ?>;">
+                            <strong>Status:</strong> <?php echo $dns_status_msg; ?>
+                        </div>
+                    </td>
+                </tr>
+                <?php endif; ?>
+                <tr>
+                    <th>Schlüssel verwalten</th>
+                    <td>
+                        <button type="submit" name="hu_ads_action" value="generate_keys" class="button">Neues Schlüsselpaar generieren</button>
+                        <p class="description">Vorsicht: Überschreibt vorhandene Schlüssel im Formular.</p>
+                    </td>
+                </tr>
+                <tr>
+                    <th>Test-Versand</th>
+                    <td>
+                        <input type="email" name="test_email_recipient" value="<?php echo esc_attr(get_option('admin_email')); ?>" class="regular-text" placeholder="test@empfaenger.de" />
+                        <button type="submit" name="hu_ads_action" value="send_test" class="button button-primary">Test-Mail senden</button>
+                    </td>
+                </tr>
+            </table>
+        </form>
+    </div>
+    <?php
+}
